@@ -17,12 +17,15 @@ import java.io.IOException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.security.NoSuchAlgorithmException;
+import java.security.PrivateKey;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.ResourceBundle;
 import javax.crypto.Cipher;
+import javax.crypto.SecretKey;
 import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
+import securemessagingapp.SecureMessagingClient.ReceivedEncryptedMessage;
 
 public class SecureMessagingApp extends Application implements Initializable {
 
@@ -85,6 +88,11 @@ public class SecureMessagingApp extends Application implements Initializable {
                         connectButton.setDisable(true);
                         usernameField.setDisable(true);
                         sendButton.setDisable(false);
+                        decryptButton.setDisable(false);
+
+                        PrivateKey privateKey = client.getPrivateKey();
+                        String privateKeyBase64 = Base64.getEncoder().encodeToString(privateKey.getEncoded());
+                        System.out.println(username + ": Private Key (Base64) on Connect: " + privateKeyBase64.substring(0, Math.min(privateKeyBase64.length(), 50)) + "...");
                     }
                 } catch (IOException e) {
                     System.err.println("Error connecting to server: " + e.getMessage());
@@ -113,39 +121,45 @@ public class SecureMessagingApp extends Application implements Initializable {
     }
 
     @FXML
-    protected void handleDecrypt() {
-        SecureMessagingClient.ReceivedEncryptedMessage selectedMessage = receivedEncryptedListView.getSelectionModel().getSelectedItem();
-        if (selectedMessage != null && client != null) {
+    private void handleDecrypt() {
+        ReceivedEncryptedMessage selectedMessage = receivedEncryptedListView.getSelectionModel().getSelectedItem();
+        if (selectedMessage != null) {
+            byte[] encryptedAesKey = selectedMessage.getEncryptedAesKey();
+            byte[] encryptedMessageWithIv = selectedMessage.getEncryptedMessageWithIv();
+
+            System.out.println("handleDecrypt: Encrypted AES Key Length: " + encryptedAesKey.length);
+            System.out.println("handleDecrypt: Length of encryptedMessageWithIv: " + encryptedMessageWithIv.length);
+
+            if (encryptedMessageWithIv.length <= 16) {
+                decryptedMessageArea.setText("Error: Invalid encrypted message format (too short).");
+                return;
+            }
+
+            byte[] ivBytes = Arrays.copyOfRange(encryptedMessageWithIv, 0, 16);
+            byte[] encryptedMessageBytes = Arrays.copyOfRange(encryptedMessageWithIv, 16, encryptedMessageWithIv.length);
+            String ivBase64 = Base64.getEncoder().encodeToString(ivBytes);
+            System.out.println("handleDecrypt: Extracted IV (Base64): " + ivBase64);
+
             try {
-                // 1. Decrypt AES key
-                Cipher rsaCipher = Cipher.getInstance("RSA");
+                // 1. Decrypt the AES key using the recipient's private key
+                Cipher rsaCipher = Cipher.getInstance("RSA/ECB/PKCS1Padding"); // Explicit padding
                 rsaCipher.init(Cipher.DECRYPT_MODE, client.getPrivateKey());
-                byte[] decryptedAesKeyBytes = rsaCipher.doFinal(selectedMessage.getEncryptedAesKey());
-                SecretKeySpec aesKey = new SecretKeySpec(decryptedAesKeyBytes, "AES");
+                byte[] decryptedAesKeyBytes = rsaCipher.doFinal(encryptedAesKey);
+                SecretKey originalAesKey = new SecretKeySpec(decryptedAesKeyBytes, "AES");
 
-                // 2. Extract IV and encrypted message
-                byte[] encryptedMessageWithIv = selectedMessage.getEncryptedMessageWithIv();
-                byte[] ivBytes = Arrays.copyOfRange(encryptedMessageWithIv, 0, 16);
-                byte[] encryptedMessage = Arrays.copyOfRange(encryptedMessageWithIv, 16, encryptedMessageWithIv.length);
-                IvParameterSpec ivSpec = new IvParameterSpec(ivBytes);
-
-                // 3. Decrypt message
+                // 2. Decrypt the message using the AES key and IV
                 Cipher aesCipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
-                aesCipher.init(Cipher.DECRYPT_MODE, aesKey, ivSpec);
-                byte[] decryptedMessageBytes = aesCipher.doFinal(encryptedMessage);
-                String decryptedMessageText = new String(decryptedMessageBytes, StandardCharsets.UTF_8);
+                aesCipher.init(Cipher.DECRYPT_MODE, originalAesKey, new IvParameterSpec(ivBytes));
+                byte[] decryptedMessageBytes = aesCipher.doFinal(encryptedMessageBytes);
+                String decryptedMessage = new String(decryptedMessageBytes, StandardCharsets.UTF_8);
+                decryptedMessageArea.setText("Decrypted message from " + selectedMessage.getSender() + ":\n" + decryptedMessage);
 
-                appendDecryptedMessage(selectedMessage.getSender(), decryptedMessageText);
-                // Optionally remove from the list after decryption
-                client.getReceivedMessages().remove(selectedMessage);
-                receivedEncryptedListView.getItems().remove(selectedMessage);
-                decryptButton.setDisable(client.getReceivedMessages().isEmpty()); // Disable if no more messages
             } catch (Exception e) {
-                System.err.println("Decryption error: " + e.getMessage());
-                appendDecryptedMessage("Error", "Decryption failed for selected message.");
+                decryptedMessageArea.setText("Decryption error: " + e.getMessage());
+                e.printStackTrace();
             }
         } else {
-            appendDecryptedMessage("Error", "No encrypted message selected.");
+            decryptedMessageArea.setText("No message selected to decrypt.");
         }
     }
 

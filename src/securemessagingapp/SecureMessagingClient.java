@@ -17,14 +17,20 @@ import java.io.IOException;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.security.*;
+import java.security.spec.InvalidKeySpecException;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import javax.crypto.BadPaddingException;
+import javax.crypto.IllegalBlockSizeException;
+import javax.crypto.NoSuchPaddingException;
 
 public class SecureMessagingClient {
 
@@ -34,8 +40,8 @@ public class SecureMessagingClient {
     private String username;
     private PublicKey publicKey;
     private PrivateKey privateKey;
-    private volatile String receivedPublicKey;
-    private final Object publicKeyLock = new Object();
+//    private Map<String, String> publicKeysCache = new HashMap<>();
+    private final Map<String, String> publicKeys = new HashMap<>(); // Cache for public keys
     @FXML private TextArea encryptedMessageArea;
     @FXML private TextArea decryptedMessageArea;
     @FXML private TextField recipientField;
@@ -45,6 +51,8 @@ public class SecureMessagingClient {
     private final ExecutorService sendExecutor = Executors.newSingleThreadExecutor();
     private final List<ReceivedEncryptedMessage> receivedMessages = new ArrayList<>();
     private SecureMessagingApp controller; // Reference to the controller
+    private String pendingRecipient; // To store the recipient of the message waiting for the key
+    private String pendingMessage;   // To store the message waiting for the recipient's key
 
     public List<ReceivedEncryptedMessage> getReceivedMessages() {
         return receivedMessages;
@@ -128,59 +136,53 @@ public class SecureMessagingClient {
         System.out.println("sendMessage method called for recipient: " + recipient + ", message: " + message);
         sendExecutor.submit(() -> {
             try {
-                System.out.println("sendMessage: Inside sendExecutor for recipient: " + recipient); // ADD THIS
+                System.out.println("sendMessage: Inside sendExecutor for recipient: " + recipient);
 
-                // 1. Get recipient's public key from the server
-                System.out.println("sendMessage: Calling getRecipientPublicKeyInBackground for " + recipient); // ADD THIS
-                String recipientPublicKeyBase64 = getRecipientPublicKeyInBackground(recipient);
-                System.out.println("sendMessage: Returned from getRecipientPublicKeyInBackground. Key: " + (recipientPublicKeyBase64 != null ? recipientPublicKeyBase64.substring(0, 20) + "..." : "null")); // ADD THIS
-
+                String recipientPublicKeyBase64 = publicKeys.get(recipient);
                 if (recipientPublicKeyBase64 == null) {
-                    Platform.runLater(() -> controller.appendEncryptedMessage("Recipient not found.\n"));
+                    System.out.println("sendMessage: Public key not in cache. Requesting from server.");
+                    out.writeUTF("GET_PUBLIC_KEY");
+                    out.writeUTF(recipient);
+                    pendingRecipient = recipient; // Store the recipient
+                    pendingMessage = message;   // Store the message
+                    Platform.runLater(() -> controller.appendEncryptedMessage("Requesting public key for " + recipient + "...\n"));
                     return;
                 }
 
-                PublicKey recipientPublicKey = getPublicKeyFromString(recipientPublicKeyBase64);
-                System.out.println("sendMessage: Got recipientPublicKey."); // ADD THIS
-
-                // 2. Generate a new AES key
+                // Public key is available, proceed with encryption and sending
                 SecretKey aesKey = generateAesKey();
-                System.out.println("sendMessage: Generated AES key."); // ADD THIS
+                System.out.println("sendMessage: Generated AES key.");
 
-                // 3. Generate an IV
                 IvParameterSpec ivSpec = generateIv();
                 byte[] ivBytes = ivSpec.getIV();
-                System.out.println("sendMessage: Generated IV."); // ADD THIS
+                System.out.println("sendMessage: Generated IV.");
 
-                // 4. Initialize AES cipher for encryption
                 Cipher aesCipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
                 aesCipher.init(Cipher.ENCRYPT_MODE, aesKey, ivSpec);
-                System.out.println("sendMessage: Initialized AES cipher for encryption."); // ADD THIS
+                System.out.println("sendMessage: Initialized AES cipher for encryption.");
 
-                // 5. Encrypt the message
                 byte[] encryptedMessage = aesCipher.doFinal(message.getBytes(StandardCharsets.UTF_8));
-                System.out.println("sendMessage: Encrypted the message."); // ADD THIS
+                System.out.println("sendMessage: Encrypted the message.");
 
-                // 6. Encrypt the AES key with the recipient's RSA public key
+                byte[] encryptedAesKey = new byte[0];
+                PublicKey recipientPublicKey = getPublicKeyFromString(recipientPublicKeyBase64);
                 Cipher rsaCipher = Cipher.getInstance("RSA");
                 rsaCipher.init(Cipher.ENCRYPT_MODE, recipientPublicKey);
-                byte[] encryptedAesKey = rsaCipher.doFinal(aesKey.getEncoded());
-                System.out.println("sendMessage: Encrypted AES key."); // ADD THIS
+                encryptedAesKey = rsaCipher.doFinal(aesKey.getEncoded());
+                System.out.println("sendMessage: Encrypted AES key using cached public key.");
 
-                // Prepare the message for sending: IV + encrypted message
                 byte[] encryptedMessageWithIv = new byte[ivBytes.length + encryptedMessage.length];
                 System.arraycopy(ivBytes, 0, encryptedMessageWithIv, 0, ivBytes.length);
                 System.arraycopy(encryptedMessage, 0, encryptedMessageWithIv, ivBytes.length, encryptedMessage.length);
-                System.out.println("sendMessage: Prepared message with IV."); // ADD THIS
+                System.out.println("sendMessage: Prepared message with IV.");
 
-                // 7. Send the message type, recipient, encrypted AES key, and encrypted message
                 out.writeUTF("SEND_MESSAGE");
                 out.writeUTF(recipient);
                 out.writeInt(encryptedAesKey.length);
                 out.write(encryptedAesKey);
                 out.writeInt(encryptedMessageWithIv.length);
                 out.write(encryptedMessageWithIv);
-                System.out.println("sendMessage: Sent message data."); // ADD THIS
+                System.out.println("sendMessage: Sent message data.");
 
                 Platform.runLater(() -> controller.appendEncryptedMessage("Encrypted message sent to " + recipient + "\n"));
 
@@ -191,21 +193,6 @@ public class SecureMessagingClient {
         });
     }
 
-
-    private String getRecipientPublicKeyInBackground(String recipient) throws IOException {
-        out.writeUTF("GET_PUBLIC_KEY");
-        out.writeUTF(recipient);
-        synchronized (publicKeyLock) {
-            receivedPublicKey = null;
-            try {
-                publicKeyLock.wait(5000); // Wait up to 5 seconds for the key
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return null;
-            }
-            return receivedPublicKey;
-        }
-    }
 
     private PublicKey getPublicKeyFromString(String key) throws Exception {
         byte[] byteKey = Base64.getDecoder().decode(key);
@@ -227,48 +214,123 @@ public class SecureMessagingClient {
     }
 
     private void startMessageListener() {
-        new Thread(() -> {
-            try {
-                System.out.println(username + ": Message listener started.");
-                while (true) {
-                    System.out.println(username + ": Message listener - waiting for message type.");
-                    String messageType = in.readUTF();
-                    System.out.println(username + ": Received message type: " + messageType);
-                    if ("RECEIVED_MESSAGE".equals(messageType)) {
-                        String sender = in.readUTF();
-                        int encryptedAesKeyLength = in.readInt();
-                        byte[] encryptedAesKey = new byte[encryptedAesKeyLength];
-                        in.readFully(encryptedAesKey);
-                        int encryptedMessageWithIvLength = in.readInt();
-                        byte[] encryptedMessageWithIv = new byte[encryptedMessageWithIvLength];
-                        in.readFully(encryptedMessageWithIv);
+    new Thread(() -> {
+        try {
+            System.out.println(username + ": Message listener started.");
+            while (true) {
+                System.out.println(username + ": Message listener - waiting for message type.");
+                String messageType = in.readUTF();
+                System.out.println(username + ": Received message type: " + messageType);
+                if ("RECEIVED_MESSAGE".equals(messageType)) {
+                    String sender = in.readUTF();
+                    int encryptedAesKeyLength = in.readInt();
+                    byte[] encryptedAesKey = new byte[encryptedAesKeyLength];
+                    in.readFully(encryptedAesKey);
+                    int encryptedMessageWithIvLength = in.readInt();
+                    byte[] encryptedMessageWithIv = new byte[encryptedMessageWithIvLength];
+                    in.readFully(encryptedMessageWithIv);
+                    
+                    System.out.println(username + ": Received encrypted AES Key (Base64, possibly offline): " + Base64.getEncoder().encodeToString(encryptedAesKey));
+                    System.out.println(username + ": Received message from " + sender + " (possibly offline)");
+                    System.out.println(username + ": Encrypted AES Key Length (received): " + encryptedAesKeyLength);
+                    System.out.println(username + ": Encrypted Message with IV Length (received): " + encryptedMessageWithIvLength);
 
-                        System.out.println(username + ": Received encrypted message from " + sender);
-                        System.out.println(username + ": Encrypted AES Key Length: " + encryptedAesKeyLength);
-                        System.out.println(username + ": Encrypted Message with IV Length: " + encryptedMessageWithIvLength);
+                    ReceivedEncryptedMessage encryptedMessage = new ReceivedEncryptedMessage(sender, encryptedAesKey, encryptedMessageWithIv);
+                    receivedMessages.add(encryptedMessage);
 
-                        ReceivedEncryptedMessage encryptedMessage = new ReceivedEncryptedMessage(sender, encryptedAesKey, encryptedMessageWithIv);
-                        receivedMessages.add(encryptedMessage);
+                    Platform.runLater(() -> {
+                        controller.appendReceivedEncryptedMessage(encryptedMessage); // Use the new method
+                    });
 
-                        Platform.runLater(() -> {
-                            controller.appendReceivedEncryptedMessage(encryptedMessage); // Use the new method
-                        });
+                } else if ("RECIPIENT_NOT_FOUND".equals(messageType)){
+                    Platform.runLater(() -> controller.appendEncryptedMessage("Recipient not found.\n"));
+                } else if (messageType != null && messageType.startsWith("PUBLIC_KEY:")) {
+                    String publicKeyInfo = messageType.substring("PUBLIC_KEY:".length());
+                    String[] parts = publicKeyInfo.split(":");
+                    if (parts.length == 2) {
+                        String senderUsername = parts[0];
+                        String publicKeyBase64 = parts[1];
+                        publicKeys.put(senderUsername, publicKeyBase64); // Store in cache
+                        System.out.println(username + ": Received and stored public key for " + senderUsername.substring(0, Math.min(senderUsername.length(), 10)) + "...: " + publicKeyBase64.substring(0, Math.min(publicKeyBase64.length(), 20)) + "...");
 
-                    } else if ("RECIPIENT_NOT_FOUND".equals(messageType)){
-                        Platform.runLater(() -> controller.appendEncryptedMessage("Recipient not found.\n"));
-                    } else if (messageType != null && messageType.startsWith("PUBLIC_KEY:")) {
-                        String publicKeyBase64 = messageType.substring("PUBLIC_KEY:".length());
-                        synchronized (publicKeyLock) {
-                            receivedPublicKey = publicKeyBase64;
-                            publicKeyLock.notify();
+                        // If we have a pending message for this recipient, send it now
+                        if (pendingRecipient != null && pendingRecipient.equals(senderUsername) && pendingMessage != null) {
+                            String recipientToSend = pendingRecipient;
+                            String messageToSend = pendingMessage;
+                             pendingRecipient = null;
+                             pendingMessage = null;
+                             // Call sendMessage again now that we have the key
+                             sendMessageInternal(recipientToSend, messageToSend);
                         }
                     }
                 }
-            } catch (IOException e) {
-                System.err.println(username + ": Error receiving message: " + e.getMessage());
             }
-        }).start();
+        } catch (IOException e) {
+            System.err.println(username + ": Error receiving message: " + e.getMessage());
+        }
+    }).start();
+}
+
+    // Internal sendMessage method to avoid infinite recursion
+        private void sendMessageInternal(String recipient, String message) {
+    if (recipient == null || recipient.trim().isEmpty() || message == null || message.isEmpty()) {
+        System.err.println("Recipient or message is empty.");
+        return;
     }
+
+    try {
+        // 1. Check if we already have the recipient's public key cached
+        String recipientPublicKeyBase64 = publicKeys.get(recipient);
+        if (recipientPublicKeyBase64 == null) {
+            // Request public key from server asynchronously, then store pending message and recipient
+            out.writeUTF("GET_PUBLIC_KEY");
+            out.writeUTF(recipient);
+            pendingRecipient = recipient;
+            pendingMessage = message;
+            Platform.runLater(() -> controller.appendEncryptedMessage("Requesting public key for " + recipient + "...\n"));
+            return;
+        }
+
+        // 2. Convert public key string to PublicKey object
+        PublicKey recipientPublicKey = getPublicKeyFromString(recipientPublicKeyBase64);
+
+        // 3. Generate AES key and IV
+        SecretKey aesKey = generateAesKey();
+        IvParameterSpec ivSpec = generateIv();
+
+        // 4. Encrypt the message using AES
+        Cipher aesCipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
+        aesCipher.init(Cipher.ENCRYPT_MODE, aesKey, ivSpec);
+        byte[] encryptedMessage = aesCipher.doFinal(message.getBytes(StandardCharsets.UTF_8));
+
+        // 5. Encrypt AES key using recipient's RSA public key
+        Cipher rsaCipher = Cipher.getInstance("RSA");
+        rsaCipher.init(Cipher.ENCRYPT_MODE, recipientPublicKey);
+        byte[] encryptedAesKey = rsaCipher.doFinal(aesKey.getEncoded());
+
+        // 6. Combine IV + encrypted message bytes
+        byte[] ivBytes = ivSpec.getIV();
+        byte[] encryptedMessageWithIv = new byte[ivBytes.length + encryptedMessage.length];
+        System.arraycopy(ivBytes, 0, encryptedMessageWithIv, 0, ivBytes.length);
+        System.arraycopy(encryptedMessage, 0, encryptedMessageWithIv, ivBytes.length, encryptedMessage.length);
+
+        // 7. Send data to server
+        out.writeUTF("SEND_MESSAGE");
+        out.writeUTF(recipient);
+        out.writeInt(encryptedAesKey.length);
+        out.write(encryptedAesKey);
+        out.writeInt(encryptedMessageWithIv.length);
+        out.write(encryptedMessageWithIv);
+
+        Platform.runLater(() -> controller.appendEncryptedMessage("Encrypted message sent to " + recipient + "\n"));
+
+    } catch (Exception e) {
+        System.err.println("Error sending message: " + e.getMessage());
+        Platform.runLater(() -> controller.appendEncryptedMessage("Error sending message: " + e.getMessage() + "\n"));
+    }
+}
+
+
 
     public String decryptReceivedMessage(String encryptedText) {
         // This method is no longer used directly for decryption in Phase 3

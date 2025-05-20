@@ -5,12 +5,8 @@
         <group>
             <file>file:/C:/Users/HomePC/Documents/NetBeansProjects/SecureMessagingApp/src/securemessagingapp/SecureMessagingClient.java</file>
             <file>file:/C:/Users/HomePC/Documents/NetBeansProjects/SecureMessagingApp/src/securemessagingapp/SecureMessagingServer.java</file>
-            <file>file:/C:/Users/HomePC/Documents/NetBeansProjects/SecureMessagingApp/src/securemessagingapp/CryptoUtil.java</file>
-            <file>file:/C:/Users/HomePC/Documents/NetBeansProjects/SecureMessagingApp/src/securemessagingapp/RSAKeyPairGenerator.java</file>
             <file>file:/C:/Users/HomePC/Documents/NetBeansProjects/SecureMessagingApp/src/securemessagingapp/messaging_phase3.fxml</file>
-            <file>file:/C:/Users/HomePC/Documents/NetBeansProjects/SecureMessagingApp/src/securemessagingapp/messaging.fxml</file>
             <file>file:/C:/Users/HomePC/Documents/NetBeansProjects/SecureMessagingApp/src/securemessagingapp/SecureMessagingApp.java</file>
-            <file>file:/C:/Users/HomePC/Documents/NetBeansProjects/SecureMessagingApp/src/securemessagingapp/ClientHandler.java</file>
         </group>
     </open-files>
 </project-private>
